@@ -30,7 +30,7 @@ AGENT_ID = 1  # 你的 Agent tokenId
 TRANSFER_AMOUNT = Web3.to_wei(0.05, 'ether')
 TARGET_ADDRESS = "0x接收地址"  # 替换
 
-# Grok API 配置（xAI）
+#  API 配置
 GROK_API_KEY = os.getenv("GROK_API_KEY")  # 设置环境变量！
 if not GROK_API_KEY:
     raise ValueError("请设置环境变量 GROK_API_KEY")
