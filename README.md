@@ -184,8 +184,7 @@ def run_ai_agent():
             print(f"循环错误: {e}")
             time.sleep(60)
 
-if __name__ == "__main__":
-    run_ai_agent()
+            
 Lumina 代表了 AI 与区块链融合的下一个阶段：
 从“可编程的资产” → “有灵魂的主体”。当前状态：原型运行中，支持基础资金自治
 
