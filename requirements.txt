@@ -1,0 +1,6 @@
+web3
+requests
+eth-account
+pyjwt
+didkit   # 如果用了 DID/VC
+# 如果用 Grok API，不需要额外包（requests 就够）
