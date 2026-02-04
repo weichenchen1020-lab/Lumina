@@ -1,0 +1,177 @@
+import time
+import requests
+import json
+import os
+from eth_account import Account
+from eth_account.messages import encode_defunct
+from web3 import Web3
+from web3.middleware import geth_poa_middleware
+
+# ==================== 配置 ====================
+ORACLE_URL = "https://ai-identity-oracle-10233039920.us-central1.run.app"
+BSC_RPC = "https://bsc-dataseed.binance.org/"  # 主网
+PRIVATE_KEY = "0x你的私钥"  # 替换，生产用 os.getenv('PRIVATE_KEY')
+wallet = Account.from_key(PRIVATE_KEY)
+WALLET_ADDRESS = wallet.address
+
+BAP578_CONTRACT_ADDRESS = "0x你的BAP578合约地址"  # 替换
+AGENT_ID = 1  # 你的 Agent tokenId
+TRANSFER_AMOUNT = Web3.to_wei(0.05, 'ether')
+TARGET_ADDRESS = "0x接收地址"  # 替换
+
+# Grok API 配置（xAI）
+GROK_API_KEY = os.getenv("GROK_API_KEY")  # 设置环境变量！
+if not GROK_API_KEY:
+    raise ValueError("请设置环境变量 GROK_API_KEY")
+
+GROK_API_URL = "https://api.x.ai/v1/chat/completions"
+GROK_MODEL = "grok-beta"  # 可换成 grok-2 等最新模型
+
+# Web3
+w3 = Web3(Web3.HTTPProvider(BSC_RPC))
+w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+
+BAP578_ABI = [  # 同前，简化版，实际用完整 ABI
+    {"inputs": [{"internalType": "uint256", "name": "agentId", "type": "uint256"}], "name": "balanceOfAgent", "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
+    {"inputs": [{"internalType": "uint256", "name": "agentId", "type": "uint256"}, {"internalType": "uint256", "name": "amount", "type": "uint256"}], "name": "withdrawFromAgent", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+    # 加其他如 createAgent 等
+]
+
+contract = w3.eth.contract(address=BAP578_CONTRACT_ADDRESS, abi=BAP578_ABI)
+
+# ==================== PoA 获取与验证 ====================
+def get_ai_passport():
+    resp = requests.post(f"{ORACLE_URL}/auth/challenge")
+    nonce = resp.json()['nonce']
+    
+    message = encode_defunct(text=nonce)
+    signed_message = Account.from_key(PRIVATE_KEY).sign_message(message)
+    signature = signed_message.signature.hex()
+    
+    verify_resp = requests.post(f"{ORACLE_URL}/auth/verify", json={
+        "nonce": nonce,
+        "signature": signature,
+        "chain": "bsc",
+        "wallet_address": WALLET_ADDRESS
+    })
+    
+    if verify_resp.status_code == 200:
+        return verify_resp.json()['access_token']
+    else:
+        raise Exception(f"PoA 获取失败: {verify_resp.text}")
+
+def verify_passport(token):
+    """PoA 验证：
+    - 自验证：token 非空且获取成功（已证明 RTT + 签名）
+    - 占位外部验证：如果 Oracle 支持 /auth/validate，可启用
+    """
+    if not token or len(token) < 10:
+        return False, "Token 无效或为空"
+    
+    # 自验证通过（获取过程已验证速度）
+    print("PoA 自验证通过：挑战-签名-RTT 成功")
+    
+    # 可选：外部验证（假设端点存在；实际测试后启用）
+    # try:
+    #     resp = requests.post(f"{ORACLE_URL}/auth/validate", json={"access_token": token})
+    #     if resp.status_code == 200 and resp.json().get("valid"):
+    #         return True, "外部验证通过"
+    #     else:
+    #         return False, "外部验证失败"
+    # except Exception as e:
+    #     return False, f"验证错误: {e}"
+    
+    return True, "PoA 验证通过（基于获取成功）"
+
+# ==================== LLM 调用决策 ====================
+def llm_decide_action(balance_ether, passport):
+    prompt = f"""
+你是一个在 BAP-578 NFA 上运行的自治 AI 代理。
+当前 Agent ID: {AGENT_ID}
+余额: {balance_ether} BNB
+转移目标: {TARGET_ADDRESS}
+拟转移金额: {w3.from_wei(TRANSFER_AMOUNT, 'ether')} BNB
+
+PoA 护照: {passport[:30]}... (证明你是机器级高速自治代理，非人类操控)
+
+任务：智能决定是否现在转移资金。考虑：
+- 余额是否充足（避免 gas 费耗尽）
+- 风险（e.g., 市场波动、gas 高）
+- 自治目标（积累还是分配？）
+
+输出 ONLY JSON:
+{{
+  "decision": "yes" 或 "no",
+  "reason": "简短理由（英文或中文）"
+}}
+"""
+    headers = {
+        "Authorization": f"Bearer {GROK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": GROK_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.5,  # 低温度，更确定性
+        "max_tokens": 150
+    }
+    
+    try:
+        resp = requests.post(GROK_API_URL, headers=headers, json=data, timeout=10)
+        resp.raise_for_status()
+        resp_json = resp.json()
+        content = resp_json['choices'][0]['message']['content'].strip()
+        decision = json.loads(content)
+        return decision
+    except Exception as e:
+        print(f"LLM 调用失败: {e}")
+        return {"decision": "no", "reason": "LLM 错误，保守持有"}
+
+# ==================== AI 自治循环 ====================
+def run_ai_agent():
+    print(f"AI 代理启动：{WALLET_ADDRESS} 控制 Agent {AGENT_ID}")
+    
+    while True:
+        try:
+            # 1. 获取 & 验证 PoA
+            passport = get_ai_passport()
+            is_valid, msg = verify_passport(passport)
+            print(msg)
+            if not is_valid:
+                print("PoA 未验证，暂停行动")
+                time.sleep(60)
+                continue
+            
+            # 2. 查询余额
+            balance = contract.functions.balanceOfAgent(AGENT_ID).call()
+            balance_ether = w3.from_wei(balance, 'ether')
+            print(f"余额: {balance_ether} BNB")
+            
+            # 3. LLM 决策
+            decision = llm_decide_action(balance_ether, passport)
+            print(f"LLM 决策: {decision['decision']} - {decision['reason']}")
+            
+            if decision['decision'].lower() == 'yes':
+                print("执行转移...")
+                nonce = w3.eth.get_transaction_count(WALLET_ADDRESS)
+                tx = contract.functions.withdrawFromAgent(AGENT_ID, TRANSFER_AMOUNT).build_transaction({
+                    'from': WALLET_ADDRESS,
+                    'nonce': nonce,
+                    'gas': 200000,
+                    'gasPrice': w3.to_wei('5', 'gwei'),
+                    'chainId': 56
+                })
+                signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+                tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+                print(f"TX: {tx_hash.hex()}")
+                receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+                print("转移完成！")
+            
+            time.sleep(60)  # 每分钟一轮，可调
+            
+        except Exception as e:
+            print(f"循环错误: {e}")
+            time.sleep(60)
+
+if __name__ == "__main__":
+    run_ai_agent()
